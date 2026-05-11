@@ -485,6 +485,173 @@ printf '%02X-%02X-%02X-%02X\n' 154 31 59 226
 # → 9A-1F-3B-E2
 ```
 
+### Cálculo manual do MIC
+
+O MIC é calculado com **AES-128-CMAC** sobre o frame completo precedido de um bloco B0 de 16 bytes:
+
+```
+MIC = AES-128-CMAC(NwkSKey, B0 | msg)[0:4]
+
+B0  = 0x49 | 0x00×4 | Dir=0 | DevAddr(LE,4) | FCnt(LE,4) | 0x00 | len(msg)
+msg = MHDR | DevAddr(LE,4) | FCtrl | FCnt(LE,2) | FPort | FRMPayload
+```
+
+> ℹ️ Em OTAA as chaves de sessão (NwkSKey e AppSKey) são derivadas após o JOIN. Use os valores impressos no Serial Monitor em `EV_JOINED` para o cálculo — eles devem bater com os exibidos na aba **Activation** do device no ChirpStack.
+
+**Python** (`pip install pycryptodome`):
+
+```python
+from Crypto.Hash import CMAC
+from Crypto.Cipher import AES
+import struct
+
+def calcular_mic(nwkskey_hex, devaddr_hex, fcnt, frame_sem_mic_hex):
+    nwkskey    = bytes.fromhex(nwkskey_hex)
+    devaddr_le = bytes.fromhex(devaddr_hex)[::-1]   # big-endian → little-endian
+    msg        = bytes.fromhex(frame_sem_mic_hex)
+
+    b0 = (bytes([0x49, 0x00, 0x00, 0x00, 0x00, 0x00])
+          + devaddr_le
+          + struct.pack('<I', fcnt)
+          + bytes([0x00, len(msg)]))
+
+    c = CMAC.new(nwkskey, ciphermod=AES)
+    c.update(b0 + msg)
+    return c.digest()[:4].hex()
+
+# Exemplo — substitua pelos valores reais obtidos após o JOIN
+mic = calcular_mic(
+    nwkskey_hex       = "151f7779d7aaee422a74568380db7045",  # NwkSKey derivada no JOIN
+    devaddr_hex       = "01a2b3c4",                          # DevAddr atribuído pelo ChirpStack
+    fcnt              = 1,                                   # FCnt do uplink
+    frame_sem_mic_hex = "40C4B3A20100010001..."              # Frame raw sem os 4 bytes de MIC
+)
+print(f"MIC: {mic}")
+```
+
+**Java** (sem dependências externas — usa `javax.crypto` da JDK):
+
+```java
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.HexFormat;
+
+public class LoRaWANMic {
+
+    public static String calcularMic(String nwksKeyHex,
+                                     String devAddrHex,
+                                     int fcnt,
+                                     String frameWithoutMicHex) throws Exception {
+        HexFormat hex = HexFormat.of();
+        byte[] nwksKey   = hex.parseHex(nwksKeyHex);
+        byte[] devAddrBe = hex.parseHex(devAddrHex);
+        byte[] msg       = hex.parseHex(frameWithoutMicHex);
+
+        // DevAddr em little-endian (invertido)
+        byte[] devAddrLe = new byte[]{ devAddrBe[3], devAddrBe[2], devAddrBe[1], devAddrBe[0] };
+
+        // FCnt em little-endian 32-bit
+        byte[] fcntLe = ByteBuffer.allocate(4)
+                                  .order(ByteOrder.LITTLE_ENDIAN)
+                                  .putInt(fcnt)
+                                  .array();
+
+        // Monta o bloco B0 (16 bytes)
+        byte[] b0 = new byte[16];
+        b0[0]  = 0x49;
+        b0[1]  = 0x00; b0[2] = 0x00; b0[3] = 0x00; b0[4] = 0x00;
+        b0[5]  = 0x00; // Dir = 0 (uplink)
+        b0[6]  = devAddrLe[0]; b0[7]  = devAddrLe[1];
+        b0[8]  = devAddrLe[2]; b0[9]  = devAddrLe[3];
+        b0[10] = fcntLe[0];    b0[11] = fcntLe[1];
+        b0[12] = fcntLe[2];    b0[13] = fcntLe[3];
+        b0[14] = 0x00;
+        b0[15] = (byte) msg.length;
+
+        // Concatena B0 || msg
+        byte[] data = new byte[b0.length + msg.length];
+        System.arraycopy(b0,  0, data, 0,         b0.length);
+        System.arraycopy(msg, 0, data, b0.length, msg.length);
+
+        // AES-128-CMAC (RFC 4493) — sem dependências externas
+        byte[] mic = aesCmac(nwksKey, data);
+        return hex.formatHex(mic, 0, 4);
+    }
+
+    // AES-128-CMAC conforme RFC 4493
+    private static byte[] aesCmac(byte[] key, byte[] data) throws Exception {
+        byte[] L  = aesCbc(key, new byte[16], new byte[16]);
+        byte[] K1 = generateSubkey(L);
+        byte[] K2 = generateSubkey(K1);
+
+        int blockCount = (data.length + 15) / 16;
+        boolean lastBlockComplete = (data.length > 0) && (data.length % 16 == 0);
+        if (blockCount == 0) { blockCount = 1; lastBlockComplete = false; }
+
+        byte[] lastBlock = new byte[16];
+        if (lastBlockComplete) {
+            System.arraycopy(data, (blockCount - 1) * 16, lastBlock, 0, 16);
+            xorBlock(lastBlock, K1);
+        } else {
+            int sz = data.length % 16;
+            System.arraycopy(data, (blockCount - 1) * 16, lastBlock, 0, sz);
+            lastBlock[sz] = (byte) 0x80;
+            xorBlock(lastBlock, K2);
+        }
+
+        byte[] x = new byte[16];
+        for (int i = 0; i < blockCount - 1; i++) {
+            byte[] block = new byte[16];
+            System.arraycopy(data, i * 16, block, 0, 16);
+            xorBlock(block, x);
+            x = aesCbc(key, new byte[16], block);
+        }
+        xorBlock(lastBlock, x);
+        return aesCbc(key, new byte[16], lastBlock);
+    }
+
+    private static byte[] aesCbc(byte[] key, byte[] iv, byte[] data) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE,
+                    new SecretKeySpec(key, "AES"),
+                    new IvParameterSpec(iv));
+        return cipher.doFinal(data);
+    }
+
+    private static byte[] generateSubkey(byte[] input) {
+        byte[] output = new byte[16];
+        boolean msb = (input[0] & 0x80) != 0;
+        for (int i = 0; i < 15; i++) {
+            output[i] = (byte) ((input[i] << 1) | ((input[i + 1] & 0xFF) >> 7));
+        }
+        output[15] = (byte) (input[15] << 1);
+        if (msb) output[15] ^= 0x87;
+        return output;
+    }
+
+    private static void xorBlock(byte[] a, byte[] b) {
+        for (int i = 0; i < 16; i++) a[i] ^= b[i];
+    }
+
+    public static void main(String[] args) throws Exception {
+        // Exemplo — substitua pelos valores reais obtidos após o JOIN
+        String mic = calcularMic(
+            "151f7779d7aaee422a74568380db7045",  // NwkSKey derivada no JOIN
+            "01a2b3c4",                           // DevAddr atribuído pelo ChirpStack
+            1,                                    // FCnt do uplink
+            "40C4B3A20100010001..."               // Frame raw sem os 4 bytes de MIC
+        );
+        System.out.println("MIC: " + mic);
+    }
+}
+```
+
+> Para compilar e executar: `javac LoRaWANMic.java && java LoRaWANMic`
+> Requer Java 17+ para `HexFormat`. Em versões anteriores, substitua `HexFormat.of().parseHex(...)` por `javax.xml.bind.DatatypeConverter.parseHexBinary(...)`.
+
 ---
 
 ## Saída esperada no Serial Monitor
