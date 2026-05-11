@@ -1,7 +1,7 @@
 # ESP32 + RFM95W — LoRaWAN Node Base (OTAA · AU915 · ChirpStack)
 
 > **Firmware base para nó LoRaWAN com ESP32 + RFM95W usando ativação OTAA, stack MCCI LMiC 6.0.1, plano de canais AU915 sub-banda 1 e servidor de rede ChirpStack.**  
-> Inclui impressão das chaves de sessão após o JOIN, MIC no Serial e diagnósticos completos de sessão.
+> Inclui impressão das chaves de sessão após o JOIN, MIC no Serial, diagnósticos completos de sessão e **reset remoto via downlink** na FPort 101.
 
 ---
 
@@ -15,6 +15,7 @@
 - [Configuração das credenciais OTAA](#configuração-das-credenciais-otaa)
 - [Plano de canais AU915 — sub-banda 1](#plano-de-canais-au915--sub-banda-1)
 - [Como funciona o JOIN OTAA](#como-funciona-o-join-otaa)
+- [Reset remoto via downlink — FPort 101](#reset-remoto-via-downlink--fport-101)
 - [Diagnósticos de sessão e MIC](#diagnósticos-de-sessão-e-mic)
 - [Saída esperada no Serial Monitor](#saída-esperada-no-serial-monitor)
 - [Cadastro no ChirpStack](#cadastro-no-chirpstack)
@@ -38,6 +39,7 @@ O código é parte de um projeto maior de medição de energia elétrica em temp
 - Transmite um payload LoRaWAN a cada 10 segundos após o JOIN usando SF7/BW125 (DR5) com 14 dBm de potência.
 - A cada transmissão (`EV_TXSTART`), imprime as chaves de sessão, DevAddr, frame raw, contadores FCnt e o **MIC** isolado.
 - Recebe e exibe downlinks do servidor nas janelas RX1/RX2 (Class A).
+- **Processa comandos de reset remoto** recebidos na FPort 101 com payload de 8 bytes estruturado (header + command + tail).
 - Configura corretamente o plano de canais AU915 sub-banda 1 e a janela RX2 (923.3 MHz / SF12/BW500).
 - Desabilita o link-check mode em `setup()` **e** em `EV_JOINED`, pois o JOIN re-habilita automaticamente.
 
@@ -297,6 +299,159 @@ Dispositivo                                   ChirpStack
 | `EV_JOINED` | JOIN aceito — sessão estabelecida, chaves impressas no Serial |
 
 O LMiC retenta o JOIN automaticamente com backoff exponencial até receber o `JoinAccept`.
+
+---
+
+## Reset remoto via downlink — FPort 101
+
+O firmware implementa um protocolo de **reset remoto** que permite reiniciar o ESP32 enviando um downlink específico pelo ChirpStack. Isso é útil em campo, quando o dispositivo está instalado em local de difícil acesso e precisa ser reiniciado para se reconectar ou limpar algum estado interno.
+
+### Protocolo do comando
+
+O comando de reset usa uma porta e estrutura de payload dedicados para evitar resets acidentais por qualquer downlink genérico.
+
+| Campo | Valor |
+|---|---|
+| **FPort** | `101` (0x65) |
+| **Tamanho do payload** | `8 bytes` exatos |
+
+**Estrutura do payload (8 bytes):**
+
+```
+Byte:   0     1     2     3     4     5     6     7
+       ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+       │ HDR │ HDR │ CMD │ CMD │ CMD │ CMD │TAIL │TAIL │
+       │0xAD │0xA1 │0xDE │0xAD │0xBE │0xEF │0x0D │0x0A │
+       └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+         \_______/   \___________________________/  \___/
+          Header             Command               Tail
+         "AdAil"           Magic word             CRLF
+```
+
+| Segmento | Bytes | Valor | Significado |
+|---|---|---|---|
+| **Header** | 0–1 | `0xAD 0xA1` | Assinatura "**Ad**ail Silv**a1**" |
+| **Command** | 2–5 | `0xDE 0xAD 0xBE 0xEF` | Magic word de reset (DEADBEEF) |
+| **Tail** | 6–7 | `0x0D 0x0A` | Marcador de fim de frame (CRLF) |
+
+**Representação em Base64** (necessário para enviar via MQTT/ChirpStack):
+
+```bash
+# Gerar o Base64 do comando de reset
+printf '\xAD\xA1\xDE\xAD\xBE\xEF\x0D\x0A' | base64
+# → rZHe rb4P Cg==  (pode variar por quebra de linha — use o valor contínuo abaixo)
+
+# Valor Base64 direto para usar no ChirpStack / MQTT:
+echo -n "raHerb7vDQo=" | base64 -d | xxd   # verificação
+```
+
+O valor Base64 correto para o payload completo é: **`raHerb7vDQo=`**
+
+### Regras de validação no firmware
+
+O firmware verifica **todos** os bytes antes de executar o reset:
+
+```cpp
+static bool isResetCommand(const uint8_t *data, uint8_t len) {
+    if (len != RESET_CMD_LEN) return false;  // tamanho exato: 8 bytes
+
+    return (data[0] == 0xAD &&   // Header byte 0
+            data[1] == 0xA1 &&   // Header byte 1
+            data[2] == 0xDE &&   // Command byte 0
+            data[3] == 0xAD &&   // Command byte 1
+            data[4] == 0xBE &&   // Command byte 2
+            data[5] == 0xEF &&   // Command byte 3
+            data[6] == 0x0D &&   // Tail byte 0 (CR)
+            data[7] == 0x0A);    // Tail byte 1 (LF)
+}
+```
+
+- FPort diferente de 101 → downlink exibido normalmente, comando ignorado.
+- Tamanho diferente de 8 bytes → comando ignorado.
+- Qualquer byte divergente → comando ignorado, payload esperado impresso no Serial.
+- Payload correto → reset executado após `2000 ms` de delay (para `Serial.flush()` concluir).
+
+### Por que o delay de 2 segundos antes do reset
+
+O `esp_restart()` é chamado após `delay(RESET_DELAY_MS)` para garantir que:
+1. O `Serial.flush()` termine de enviar os logs de diagnóstico.
+2. Se o downlink for **confirmado** (`confirmed: true`), o ACK ainda seja transmitido pelo LMiC antes do reboot — embora em Class A isso não seja garantido pois o ACK vai no próximo uplink.
+
+### Como disparar o reset pelo MQTT
+
+**ChirpStack v4 — com TLS:**
+
+```bash
+APP_ID="56560a65-2fb8-444c-a1ee-bd0ee4be0946"
+DEV_EUI="de631ea3e5f58df3"
+
+mosquitto_pub \
+  -h chirpstack-v4.adailsilva.com.br \
+  -p 8883 \
+  --cafile ~/chirpstack/mqtt-certs/ca.crt \
+  -u "adailsilva" \
+  -P "H@cker101" \
+  -t "application/${APP_ID}/device/${DEV_EUI}/command/down" \
+  -m '{
+    "devEui": "de631ea3e5f58df3",
+    "confirmed": false,
+    "fPort": 101,
+    "data": "raHerb7vDQo="
+  }'
+```
+
+**Via interface web do ChirpStack:**
+
+> Devices → seu device → **Queue** → Add item
+> - FPort: `101`
+> - Confirmed: `false`
+> - Base64 data: `raHerb7vDQo=`
+
+O downlink ficará na fila até o próximo uplink do dispositivo (Class A). Após receber, o ESP32 reinicia em ~2 segundos.
+
+### Saída no Serial Monitor — reset bem-sucedido
+
+```
+159750: EV_TXCOMPLETE (includes waiting for RX windows)
+  Downlink received — 8 byte(s) on FPort 101: AD A1 DE AD BE EF 0D 0A
+  [RESET PORT] Command received on FPort 101 — validating...
+  [RESET] Valid reset command — rebooting in 2 s...
+
+ets Jun  8 2016 00:22:57
+rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+...
+Starting — ChirpStack AU915 OTAA
+5832: EV_JOINING
+```
+
+### Saída no Serial Monitor — payload inválido
+
+```
+159750: EV_TXCOMPLETE (includes waiting for RX windows)
+  Downlink received — 8 byte(s) on FPort 101: AD A1 DE AD BE EF 0D FF
+  [RESET PORT] Command received on FPort 101 — validating...
+  [RESET] Invalid payload — command ignored.
+  Expected: AD A1 DE AD BE EF 0D 0A
+  Received: AD A1 DE AD BE EF 0D FF
+```
+
+### Personalização do protocolo
+
+Todos os bytes do comando são definidos como constantes no topo do sketch — fácil de alterar sem tocar na lógica:
+
+```cpp
+#define RESET_FPORT      101    // FPort dedicada ao comando
+#define RESET_CMD_LEN      8    // tamanho exato do payload
+#define RESET_HDR_0     0xAD    // Header byte 0
+#define RESET_HDR_1     0xA1    // Header byte 1
+#define RESET_CMD_0     0xDE    // Command byte 0 (DEADBEEF)
+#define RESET_CMD_1     0xAD    // Command byte 1
+#define RESET_CMD_2     0xBE    // Command byte 2
+#define RESET_CMD_3     0xEF    // Command byte 3
+#define RESET_TAIL_0    0x0D    // Tail byte 0 — CR
+#define RESET_TAIL_1    0x0A    // Tail byte 1 — LF
+#define RESET_DELAY_MS  2000    // delay antes do esp_restart()
+```
 
 ---
 
