@@ -416,7 +416,6 @@ void do_send(osjob_t *j) {
     //payload[0] = counter++;  // Altera o primeiro byte.
 
     /* TODO: read real sensor data into payload[] before calling setTxData2. */
-    /* TODO: read real sensor data into payload[] before transmitting. */
     LMIC_setTxData2(1, payload, sizeof(payload) - 1, 0 /* unconfirmed */);
     Serial.println(F("Packet queued."));
 }
