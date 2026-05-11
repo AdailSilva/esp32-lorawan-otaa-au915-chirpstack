@@ -1,6 +1,6 @@
 # ESP32 + RFM95W — LoRaWAN Node Base (OTAA · AU915 · ChirpStack)
 
-> **Firmware base para nó LoRaWAN com ESP32 + RFM95W usando ativação OTAA, stack MCCI LMiC 3.0.99, plano de canais AU915 sub-banda 1 e servidor de rede ChirpStack.**  
+> **Firmware base para nó LoRaWAN com ESP32 + RFM95W usando ativação OTAA, stack MCCI LMiC 6.0.1, plano de canais AU915 sub-banda 1 e servidor de rede ChirpStack.**  
 > Inclui impressão das chaves de sessão após o JOIN, MIC no Serial e diagnósticos completos de sessão.
 
 ---
@@ -110,22 +110,28 @@ Ajuste conforme sua montagem antes de compilar.
 |---|---|---|
 | Arduino IDE | 2.x | [arduino.cc/en/software](https://www.arduino.cc/en/software) |
 | ESP32 Arduino core | 3.3.8 | [github.com/espressif/arduino-esp32](https://github.com/espressif/arduino-esp32) |
-| MCCI LoRaWAN LMIC | **3.0.99** | Ver seção abaixo |
+| MCCI LoRaWAN LMIC | **6.0.1** | Ver seção abaixo |
 
 ---
 
 ## Instalação da biblioteca LMiC
 
-### Opção A — Via Arduino IDE Library Manager
-
-> **Tools → Manage Libraries → pesquise "MCCI LoRaWAN LMIC" → instale a versão 3.0.99**
-
-### Opção B — Via git
+### Opção A — Repositório com a versão correta (recomendado)
 
 ```bash
 cd ~/Arduino/libraries
 
-git clone --branch v3.0.99.10 \
+git clone \
+  https://github.com/AdailSilva/IBM-LMIC-LoRaWAN-MAC-in-C-library-v6.0.1.git \
+  MCCI_LoRaWAN_LMIC_library
+```
+
+### Opção B — Repositório upstream com tag v6.0.1
+
+```bash
+cd ~/Arduino/libraries
+
+git clone --branch v6.0.1 \
   https://github.com/mcci-catena/arduino-lmic.git \
   MCCI_LoRaWAN_LMIC_library
 ```
