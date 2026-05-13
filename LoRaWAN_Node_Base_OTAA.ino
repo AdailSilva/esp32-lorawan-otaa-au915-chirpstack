@@ -290,8 +290,8 @@ static void print_info_session(void) {
 *****************************/
 
 void onEvent(ev_t ev) {
-    Serial.print(os_getTime());
-    Serial.print(F(": "));
+    //Serial.print(os_getTime());
+    //Serial.print(F(": "));
 
     switch (ev) {
 
@@ -325,6 +325,7 @@ void onEvent(ev_t ev) {
             break;
 
         case EV_TXSTART:
+            Serial.println();
             Serial.println(F("EV_TXSTART"));
             print_info_session();
             break;
