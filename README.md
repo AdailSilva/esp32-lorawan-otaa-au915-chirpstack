@@ -325,7 +325,7 @@ Byte:   0     1     2     3     4     5     6     7
        └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
          \_______/   \___________________________/  \___/
           Header             Command               Tail
-         "AdAil"           Magic word             CRLF
+         "Adail"           Magic word             CRLF
 ```
 
 | Segmento | Bytes | Valor | Significado |

@@ -73,7 +73,7 @@ void os_getDevKey(u1_t *buf) { memcpy_P(buf, APPKEY, 16); }
 /*        │0xAD │0xA1 │0xDE │0xAD │0xBE │0xEF │0x0D │0x0A │           */
 /*        └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘           */
 /*                                                                    */
-/*  Header  (2 bytes): 0xAD 0xA1  — "AdAil" signature                 */
+/*  Header  (2 bytes): 0xAD 0xA1  — "Adail" signature                 */
 /*  Command (4 bytes): 0xDE 0xAD 0xBE 0xEF — reset magic word         */
 /*  Tail    (2 bytes): 0x0D 0x0A  — CRLF end-of-frame marker          */
 /*                                                                    */
